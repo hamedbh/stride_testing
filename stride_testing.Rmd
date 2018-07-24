@@ -74,23 +74,61 @@ full_matrix <- df %>%
     mutate_if(is.character, as.factor) %>% 
     data.matrix()
 
-sparse_matrix <- sparse.model.matrix(
-    income_level ~ ., 
-    data = df %>% 
-        mutate(income_level = if_else(
-            income_level == ">50K", 
-            1L, 
-            0L)))
-    
-head(sparse_matrix)
+# sparse_matrix <- sparse.model.matrix(
+#     income_level ~ ., 
+#     data = df %>% 
+#         mutate(income_level = if_else(
+#             income_level == ">50K", 
+#             1L, 
+#             0L)))
+#     
+# head(sparse_matrix)
 output_vector <- as.integer(df[, "income_level"] == ">50K")
-head(output_vector, n = 50)
+# head(output_vector)
 train_indxs <- createDataPartition(df$income_level, 
                                    times = 1, 
                                    p = 0.8, 
                                    list = FALSE)
 
-train <- full_matrix
+train <- full_matrix[train_indxs, seq_len(ncol(full_matrix) - 1)]
+test  <- full_matrix[-train_indxs, seq_len(ncol(full_matrix) - 1)] 
+train_labels <- output_vector[train_indxs]
+test_labels <- output_vector[-train_indxs]
+```
+
+
+```{r}
+dtrain <- xgb.DMatrix(data = train, label = train_labels) #, missing = 0L)
+dtest <- xgb.DMatrix(data = test, label = test_labels)
+my_cv <- xgb.cv(params = list(eta = 0.1, 
+                              max_depth = 4, 
+                              objective = "binary:logistic"), 
+                data = dtrain, 
+                nrounds = 1000L, 
+                nfold = 5, 
+                prediction = TRUE, 
+                showsd = TRUE, 
+                metrics = "error", 
+                stratified = TRUE, 
+                print_every_n = 50L, 
+                early_stopping_rounds = 100L)
+```
+
+```{r}
+best_iter <- which.min(my_cv$evaluation_log$test_error_mean)
+my_xgb <- xgb.train(params = list(eta = 0.1, 
+                              max_depth = 4, 
+                              objective = "binary:logistic"), 
+                    data = dtrain, 
+                    nrounds = best_iter, 
+                    metrics = "error", 
+                    print_every_n = 10L)
+```
+
+```{r}
+preds <- as.integer(predict(my_xgb, dtest) > 0.5)
+conf_mat <- confusionMatrix(as.factor(preds), as.factor(test_labels))
+conf_mat
 ```
 
 ```{r}
@@ -113,7 +151,18 @@ data.frame(a = df$income_level[1:10],
 
 
 ```{r}
+data(agaricus.train, package='xgboost')
+bst <- xgboost(data = agaricus.train$data, label = agaricus.train$label, max_depth = 2,
+               eta = 1, nthread = 2, nrounds = 2, objective = "binary:logistic")
+saveRDS(bst, "xgb.model.rds")
 
+bst1 <- readRDS("xgb.model.rds")
+# the handle is invalid:
+print(bst1$handle)
+
+bst1 <- xgb.Booster.complete(bst1)
+# now the handle points to a valid internal booster model:
+print(bst1$handle)
 ```
 
 [1]: https://archive.ics.uci.edu/ml/datasets/adult
