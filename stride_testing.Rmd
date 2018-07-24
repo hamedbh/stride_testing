@@ -1,0 +1,119 @@
+---
+title: "Testing R on Stride"
+output: html_notebook
+---
+Notebook for testing R on STRIDE. Runs through downloading data, plotting various elements and then running machine learning algorithms to predict outcome.
+
+Dataset used is the [UCI Adult][1] data, which allows for binary prediction of whether or not given adult has an income above $50,000.
+
+```{r load libraries, message=FALSE, warning=FALSE, paged.print=FALSE}
+library(purrr)
+# library(data.table)
+library(dplyr)
+library(ggplot2)
+# library(ggthemes)
+library(tidyr)
+library(readr)
+library(caret)
+library(xgboost)
+library(Matrix)
+```
+
+```{r get data}
+data_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
+data_filepath <- "./data/adult.csv"
+if (!file.exists(data_filepath)) {
+    download.file(data_url, data_filepath)
+}
+headers <- c("age", "workclass", "fnlwgt", "education", "education_num", 
+             "marital_status", "occupation", "relationship", "race", 
+             "sex", "cap_gain", "cap_loss", "hrs_per_week", "native_country", 
+             "income_level")
+df <- read_csv(data_filepath, col_names = headers)
+```
+
+Now do some quick plotting to check for obvious problems with the dataset (e.g. imbalanced classes).
+
+```{r plotting variables}
+df %>% 
+    dplyr::select_if(is.character) %>% 
+    gather() %>% 
+    ggplot(aes(x = value)) +
+    geom_bar() +
+    facet_wrap(~ key, scales = "free_x") + 
+    theme_minimal() +
+    # theme_tufte() +
+    theme(axis.text.x = element_blank())
+
+df %>% 
+    dplyr::select_if(is.integer) %>% 
+    gather() %>% 
+    ggplot(aes(x = value)) +
+    geom_histogram(bins = 20) +
+    facet_wrap(~ key, scales = "free_x") + 
+    theme_minimal() +
+    # theme_tufte() +
+    theme(axis.text.x = element_blank())
+```
+
+Check for, and handle, missing data.
+
+```{r missing data}
+na_counts <- sapply(df, function(y) {
+    sum(length(which(is.na(y))))
+})
+na_counts
+```
+
+```{r}
+full_matrix <- df %>% 
+    mutate(income_level = if_else(
+        income_level == ">50K", 
+        1L, 
+        0L)) %>% 
+    mutate_if(is.character, as.factor) %>% 
+    data.matrix()
+
+sparse_matrix <- sparse.model.matrix(
+    income_level ~ ., 
+    data = df %>% 
+        mutate(income_level = if_else(
+            income_level == ">50K", 
+            1L, 
+            0L)))
+    
+head(sparse_matrix)
+output_vector <- as.integer(df[, "income_level"] == ">50K")
+head(output_vector, n = 50)
+train_indxs <- createDataPartition(df$income_level, 
+                                   times = 1, 
+                                   p = 0.8, 
+                                   list = FALSE)
+
+train <- full_matrix
+```
+
+```{r}
+
+df %>% 
+    mutate(income_level = if_else(
+        as.integer(income_level) == 2 ~ 1L, 
+        TRUE                          ~ 0L
+    ))
+# DT[as.integer(income_level) == 2]
+unique(df$income_level)
+numeric_df <- data.matrix(df)
+unique(numeric_df[, "income_level"])
+sparse_matrix <- sparse.model.matrix(DT)
+
+data.frame(a = df$income_level[1:10], 
+           b = numeric_df[1:10, "income_level"])
+
+```
+
+
+```{r}
+
+```
+
+[1]: https://archive.ics.uci.edu/ml/datasets/adult
