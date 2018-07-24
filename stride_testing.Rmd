@@ -6,11 +6,17 @@ Notebook for testing R on STRIDE. Runs through downloading data, plotting variou
 
 Dataset used is the [UCI Adult][1] data, which allows for binary prediction of whether or not given adult has an income above $50,000.
 
+```{r starting timestamp}
+start_time <- Sys.time()
+paste("Notebook started at", start_time)
+```
+
 ```{r load libraries, message=FALSE, warning=FALSE, paged.print=FALSE}
 library(purrr)
 # library(data.table)
 library(dplyr)
 library(ggplot2)
+library(viridis)
 # library(ggthemes)
 library(tidyr)
 library(readr)
@@ -99,41 +105,70 @@ test_labels <- output_vector[-train_indxs]
 
 
 ```{r}
-dtrain <- xgb.DMatrix(data = train, label = train_labels) #, missing = 0L)
+dtrain <- xgb.DMatrix(data = train, label = train_labels)
 dtest <- xgb.DMatrix(data = test, label = test_labels)
-my_cv <- xgb.cv(params = list(eta = 0.01, 
-                              max_depth = 4, 
-                              objective = "binary:logistic"), 
-                data = dtrain, 
-                nrounds = 2000L, 
-                nfold = 5, 
-                prediction = TRUE, 
-                showsd = TRUE, 
-                metrics = "logloss", 
-                stratified = TRUE, 
-                print_every_n = 100L)
+xgb_grid <- expand.grid(
+    eta = c(0.01, 0.05), 
+    max_depth = c(2, 3, 4)
+)
+cv_list <- map(seq_len(nrow(xgb_grid)), function(i) {
+    a <- xgb_grid[i, ][["eta"]]
+    b <- xgb_grid[i, ][["max_depth"]]
+    
+    xgb.cv(params = list(eta = a, 
+                         max_depth = b, 
+                         objective = "binary:logistic"), 
+           data = dtrain, 
+           nrounds = 1000L, 
+           nfold = 5, 
+           prediction = TRUE, 
+           showsd = TRUE, 
+           metrics = "error", 
+           stratified = TRUE, 
+           print_every_n = 100L, 
+           early_stopping_rounds = 100L)
+})
+# my_cv <- xgb.cv(params = list(eta = 0.01, 
+#                               max_depth = 4, 
+#                               objective = "binary:logistic"), 
+#                 data = dtrain, 
+#                 nrounds = 2000L, 
+#                 nfold = 5, 
+#                 prediction = TRUE, 
+#                 showsd = TRUE, 
+#                 metrics = "logloss", 
+#                 stratified = TRUE, 
+#                 print_every_n = 100L)
 ```
 
 ```{r}
-my_cv[["evaluation_log"]] %>% 
+errors <- map_dbl(seq_along(cv_list), function(i) {
+    min(cv_list[[i]][["evaluation_log"]][["test_error_mean"]])
+})
+best_cv <- cv_list[[which.min(errors)]]
+(best_params <- xgb_grid[which.min(errors), ])
+```
+
+```{r}
+best_cv[["evaluation_log"]] %>% 
     gather(key = "partition", value = "error", 
-           train_logloss_mean, test_logloss_mean) %>% 
+           train_error_mean, test_error_mean) %>% 
     dplyr::select(iter, partition, error) %>% 
     mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
     ggplot(aes(x = iter, y = error, colour = partition)) +
     geom_point() +
-    viridis::scale_colour_viridis(discrete = TRUE, option = "D") + 
+    scale_colour_viridis(discrete = TRUE, option = "C") + 
     theme_minimal()
 ```
 
 ```{r}
-best_iter <- which.min(my_cv$evaluation_log$test_logloss_mean)
-my_xgb <- xgb.train(params = list(eta = 0.1, 
-                              max_depth = 4, 
-                              objective = "binary:logistic"), 
+best_iter <- which.min(best_cv[["evaluation_log"]][["test_error_mean"]])
+my_xgb <- xgb.train(params = list(eta = best_params[["eta"]], 
+                                  max_depth = best_params[["max_depth"]], 
+                                  objective = "binary:logistic"), 
                     data = dtrain, 
                     nrounds = best_iter, 
-                    metrics = "logloss")
+                    metrics = "error")
 ```
 
 ```{r}
@@ -146,10 +181,16 @@ F1_scores <- map_dbl(thresholds,
                          conmat[["byClass"]][["F1"]]
 })
 best_threshold <- thresholds[which.max(F1_scores)]
-paste("Best threshold tested is", best_threshold)
 preds <- as.integer(predict(my_xgb, dtest) > best_threshold)
-conf_mat <- confusionMatrix(as.factor(preds), as.factor(test_labels))
-conf_mat
+(conf_mat <- confusionMatrix(as.factor(preds), as.factor(test_labels)))
+paste0("Best threshold tested is ", best_threshold, 
+       ", which gives an F1 score of ", 
+       round(conf_mat[["byClass"]][["F1"]], 3))
+```
+
+```{r}
+finish_time <- Sys.time()
+finish_time - start_time
 ```
 
 
