@@ -2,5 +2,4 @@
 .Rhistory
 .RData
 .Ruserdata
-data/*.csv
-*.nb.html
+data/adult.csv
