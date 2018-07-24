@@ -17,6 +17,7 @@ library(readr)
 library(caret)
 library(xgboost)
 library(Matrix)
+library(stringi)
 ```
 
 ```{r get data}
@@ -100,69 +101,57 @@ test_labels <- output_vector[-train_indxs]
 ```{r}
 dtrain <- xgb.DMatrix(data = train, label = train_labels) #, missing = 0L)
 dtest <- xgb.DMatrix(data = test, label = test_labels)
-my_cv <- xgb.cv(params = list(eta = 0.1, 
+my_cv <- xgb.cv(params = list(eta = 0.01, 
                               max_depth = 4, 
                               objective = "binary:logistic"), 
                 data = dtrain, 
-                nrounds = 1000L, 
+                nrounds = 2000L, 
                 nfold = 5, 
                 prediction = TRUE, 
                 showsd = TRUE, 
-                metrics = "error", 
+                metrics = "logloss", 
                 stratified = TRUE, 
-                print_every_n = 50L, 
-                early_stopping_rounds = 100L)
+                print_every_n = 100L)
 ```
 
 ```{r}
-best_iter <- which.min(my_cv$evaluation_log$test_error_mean)
+my_cv[["evaluation_log"]] %>% 
+    gather(key = "partition", value = "error", 
+           train_logloss_mean, test_logloss_mean) %>% 
+    dplyr::select(iter, partition, error) %>% 
+    mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
+    ggplot(aes(x = iter, y = error, colour = partition)) +
+    geom_point() +
+    viridis::scale_colour_viridis(discrete = TRUE, option = "D") + 
+    theme_minimal()
+```
+
+```{r}
+best_iter <- which.min(my_cv$evaluation_log$test_logloss_mean)
 my_xgb <- xgb.train(params = list(eta = 0.1, 
                               max_depth = 4, 
                               objective = "binary:logistic"), 
                     data = dtrain, 
                     nrounds = best_iter, 
-                    metrics = "error", 
-                    print_every_n = 10L)
+                    metrics = "logloss")
 ```
 
 ```{r}
-preds <- as.integer(predict(my_xgb, dtest) > 0.5)
+thresholds <- seq(0.1, 0.9, by = 0.05)
+F1_scores <- map_dbl(thresholds, 
+                     function(x) {
+                         tmp_preds <- as.integer(predict(my_xgb, dtest) > x)
+                         conmat <- confusionMatrix(as.factor(tmp_preds), 
+                                                   as.factor(test_labels))
+                         conmat[["byClass"]][["F1"]]
+})
+best_threshold <- thresholds[which.max(F1_scores)]
+paste("Best threshold tested is", best_threshold)
+preds <- as.integer(predict(my_xgb, dtest) > best_threshold)
 conf_mat <- confusionMatrix(as.factor(preds), as.factor(test_labels))
 conf_mat
 ```
 
-```{r}
 
-df %>% 
-    mutate(income_level = if_else(
-        as.integer(income_level) == 2 ~ 1L, 
-        TRUE                          ~ 0L
-    ))
-# DT[as.integer(income_level) == 2]
-unique(df$income_level)
-numeric_df <- data.matrix(df)
-unique(numeric_df[, "income_level"])
-sparse_matrix <- sparse.model.matrix(DT)
-
-data.frame(a = df$income_level[1:10], 
-           b = numeric_df[1:10, "income_level"])
-
-```
-
-
-```{r}
-data(agaricus.train, package='xgboost')
-bst <- xgboost(data = agaricus.train$data, label = agaricus.train$label, max_depth = 2,
-               eta = 1, nthread = 2, nrounds = 2, objective = "binary:logistic")
-saveRDS(bst, "xgb.model.rds")
-
-bst1 <- readRDS("xgb.model.rds")
-# the handle is invalid:
-print(bst1$handle)
-
-bst1 <- xgb.Booster.complete(bst1)
-# now the handle points to a valid internal booster model:
-print(bst1$handle)
-```
 
 [1]: https://archive.ics.uci.edu/ml/datasets/adult
