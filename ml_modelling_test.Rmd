@@ -1,0 +1,188 @@
+---
+title: "Testing Hierarchical, Multilevel Modelling"
+output: html_notebook
+---
+
+```{r}
+start_time <- Sys.time()
+```
+
+```{r}
+library("lme4")
+library("ggplot2")
+library("googleVis")
+library("stargazer")
+library("sjPlot")
+
+sleepstudy <- sleepstudy
+head(sleepstudy)
+```
+
+```{r}
+# "Pooled" (days ~ reaction, without groups) scatterplot and linear model
+ggplot(sleepstudy, aes(x = Days, y = Reaction)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    geom_point(alpha = 0.3, size = 3) +
+    theme_bw() + 
+    scale_x_continuous(breaks = 0:9)
+```
+
+```{r}
+# Create pooled linear model and predictions
+pooled.model <- lm(Reaction ~ Days, sleepstudy)
+
+# Save the fitted values
+sleepstudy$PooledPredictions <- fitted(pooled.model)
+summary(pooled.model)
+```
+
+```{r}
+qplot(x = fitted(pooled.model), y = resid(pooled.model)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    geom_point(alpha = 0.3, size = 3) +
+    theme_bw()
+```
+
+```{r}
+# Create pooled linear model and predictions
+log.pooled.model <- lm(log(Reaction) ~ Days, sleepstudy)
+
+# Save the fitted values
+sleepstudy$LogPooledPredictions <- exp(fitted(log.pooled.model))
+summary(log.pooled.model)
+```
+
+```{r}
+qplot(x = fitted(log.pooled.model), y = resid(log.pooled.model)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    geom_point(alpha = 0.3, size = 3) +
+    theme_bw()
+```
+
+```{r}
+ggplot(sleepstudy, aes(x = Days, y = Reaction)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    geom_line(aes(y = LogPooledPredictions), color = "red") + 
+    geom_point(alpha = 0.3, size = 3) +
+    theme_bw()
+```
+
+```{r}
+ggplot(sleepstudy, aes(x = Days, y = Reaction, group = Subject)) +
+    geom_smooth(method = "lm", se = FALSE, color = "darkgrey") +
+    theme_bw()
+```
+
+```{r}
+ggplot(sleepstudy, aes(x = Days, y = Reaction, group = Subject)) +
+    geom_smooth(method = "lm", se = FALSE, color = "darkgrey") +
+    geom_point(alpha = 0.3, size = 3) +
+    facet_wrap(~Subject) +
+    theme_bw()
+```
+
+```{r}
+# Fit the varying intercept model
+varying.intercept.model <- lm(Reaction ~ Days + Subject, sleepstudy)
+# Save the fitted values
+sleepstudy$VaryingInterceptPredictions <- fitted(varying.intercept.model)
+
+# Fit the varying slope model
+varying.slope.model <- lm(Reaction ~ Days:Subject, sleepstudy)
+# Save the fitted values
+sleepstudy$VaryingSlopePredictions <- fitted(varying.slope.model)
+
+# Fit the varying slope and intercept model
+interaction.model <- lm(Reaction ~ Days + Subject + Days:Subject, sleepstudy)
+# Save the fitted values
+sleepstudy$InteractionPredictions <- fitted(interaction.model)
+
+ggplot(sleepstudy, aes(x = Days, y = Reaction, group = Subject)) +
+    geom_line(aes(y = PooledPredictions), color = "darkgrey") +
+    geom_line(aes(y = VaryingInterceptPredictions), color = "blue") +
+    #geom_line(aes(y = VaryingSlopePredictions), color = "red") +
+    #geom_line(aes(y = InteractionPredictions), color = "black") +
+    geom_point(alpha = 0.3, size = 3) +
+    facet_wrap(~Subject) +
+    theme_bw()
+```
+
+```{r}
+ggplot(sleepstudy, aes(x = Days, y = Reaction, group = Subject)) +
+    geom_line(aes(y = PooledPredictions), color = "darkgrey") +
+    #geom_line(aes(y = VaryingInterceptPredictions), color = "blue") +
+    geom_line(aes(y = VaryingSlopePredictions), color = "red") +
+    #geom_line(aes(y = InteractionPredictions), color = "black") +
+    geom_point(alpha = 0.3, size = 3) +
+    facet_wrap(~Subject) +
+    theme_bw()
+```
+
+```{r}
+ggplot(sleepstudy, aes(x = Days, y = Reaction, group = Subject)) +
+    geom_line(aes(y = PooledPredictions), color = "darkgrey") +
+    #geom_line(aes(y = VaryingInterceptPredictions), color = "blue") +
+    #geom_line(aes(y = VaryingSlopePredictions), color = "red") +
+    geom_line(aes(y = InteractionPredictions), color = "black") +
+    geom_point(alpha = 0.3, size = 3) +
+    facet_wrap(~Subject) +
+    theme_bw()
+```
+
+```{r}
+ml.model <- lmer(Reaction ~ Days + (1 + Days | Subject), sleepstudy)
+# Save the fitted values
+sleepstudy$MLPredictions <- fitted(ml.model)
+
+ggplot(sleepstudy, aes(x = Days, y = Reaction, group = Subject)) +
+    geom_line(aes(y = PooledPredictions), color = "darkgrey") +
+    geom_line(aes(y = MLPredictions), color = "red") +
+    geom_line(aes(y = InteractionPredictions), color = "black") +
+    geom_point(alpha = 0.3, size = 3) +
+    facet_wrap(~Subject) +
+    theme_bw()
+```
+
+```{r}
+summary(ml.model)
+fixef(ml.model)
+ranef(ml.model)
+```
+
+```{r}
+sjp.lmer(ml.model, sort.coef = "Days", free.scale = FALSE)
+```
+
+```{r}
+# remove some data vfor subject 335, check effect
+sleepstudy.missing.data <- sleepstudy[-c(82:89),]
+
+# Create pooled linear model and predictions
+missing.data.pooled.model <- lm(Reaction ~ Days, sleepstudy.missing.data)
+
+# Save the fitted values
+sleepstudy.missing.data$PooledPredictions <- fitted(missing.data.pooled.model)
+
+ml.model.missing.data <- lmer(Reaction ~ Days + (1 + Days | Subject),
+                              sleepstudy.missing.data)
+# Save the fitted values
+sleepstudy.missing.data$MLPredictions <- fitted(ml.model.missing.data)
+
+ggplot(sleepstudy.missing.data, aes(x = Days, y = Reaction, group = Subject)) +
+    geom_line(aes(y = PooledPredictions), color = "darkgrey") +
+    geom_line(aes(y = MLPredictions), color = "red") +
+    geom_smooth(method ="lm", se = FALSE, color = "black") +
+    geom_point(alpha = 0.3, size = 3) +
+    facet_wrap(~Subject) +
+    theme_bw()
+```
+
+```{r}
+sjp.lmer(ml.model.missing.data, sort.coef = "Days", free.scale = FALSE)
+```
+
+```{r}
+finish_time <- Sys.time()
+paste0("Total time to run was ", finish_time - start_time)
+```
+
