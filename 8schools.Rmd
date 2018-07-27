@@ -1,0 +1,67 @@
+---
+title: "(Many) Schools in RStan"
+output: html_notebook
+---
+
+Takes the 8Schools example from the RStan [GitHub page][1] and allows for increasing the number of schools, testing capacity of a machine.
+
+First load the `rstan` library, set some options and load the original data used in the example for 8 schools.
+
+```{r}
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+schools_dat <- list(J = 8, 
+                    y = c(28, 8, -3, 7, -1, 1, 18, 12), 
+                    sigma = c(15, 10, 16, 11, 9, 11, 10, 18))
+```
+
+Now set parameter `big_school_size`, and use it to generate a larger dataset.
+
+```{r}
+big_school_size <- 50L
+
+big_schools_dat <- list(
+    J = big_school_size, 
+    y = sample(schools_dat$y, size = big_school_size, replace = TRUE), 
+    sigma = sample(schools_dat$sigma, size = big_school_size, replace = TRUE)
+)
+```
+
+Now fit the `stan` model. This calls from the `8schools.stan` script saved locally. Parameters `iter` and `chains` will affect the time taken to run (controlling the number of iterations and [Markov Chains][2] respectively). Wrapping it in `system.time` captures the time taken. NB. that elapsed time will be more accurate if using multiple cores.
+
+```{r}
+system.time(
+    {
+        fit <- stan(file = "8schools.stan", 
+                    data = big_schools_dat, 
+                    iter = 10000, 
+                    chains = 8, 
+                    control = list(adapt_delta = 0.9))
+    }
+)
+```
+
+Several built-in methods available for printing and plotting.
+```{r}
+print(fit)
+plot(fit)
+pairs(fit, pars = c("mu", "tau", "lp__"))
+```
+
+Some examples of manipulations to get objects for use in other applications.
+
+```{r}
+la <- extract(fit, permuted = TRUE)
+mu <- la$mu
+a <- extract(fit, permuted = FALSE)
+a2 <- as.array(fit)
+m <- as.matrix(fit)
+d <- as.data.frame(fit)
+
+print(fit, digits = 1)
+```
+
+[1]: https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started
+[2]: https://en.wikipedia.org/wiki/Markov_chain
