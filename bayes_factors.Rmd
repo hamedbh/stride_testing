@@ -1,0 +1,192 @@
+---
+title: "Bayes Factors via Serial Tempering"
+output: html_notebook
+---
+```{r starting timestamp}
+start_time <- Sys.time()
+paste("Notebook started at", start_time)
+```
+
+From the [MCMC vignette](https://cran.r-project.org/web/packages/mcmc/index.html).
+
+```{r}
+suppressPackageStartupMessages({
+    library(mcmc)
+})
+my_seed <- 42L
+```
+
+Now load the data and run a frequentist analysis.
+
+```{r}
+data("logit")
+out <- glm(y ~ x1 + x2 + x3 + x4, 
+           data = logit, 
+           family = binomial, 
+           x = TRUE)
+base::summary(out)
+```
+
+```{r}
+varnam <- paste0("x", 1:4)
+nvar <- length(varnam)
+models <- NULL
+foo <- seq(0, 2^nvar - 1)
+for (i in 1:nvar) {
+    bar <- foo %/% 2^(i - 1)
+    bar <- bar %% 2
+    models <- cbind(bar, models, deparse.level = 0)
+}
+colnames(models) <- varnam
+models
+```
+
+```{r}
+neighbors <- matrix(FALSE, nrow(models), nrow(models))
+for (i in 1:nrow(neighbors)) {
+    for (j in 1:ncol(neighbors)) {
+        foo <- models[i, ]
+        bar <- models[j, ]
+        if (sum(foo != bar) == 1) neighbors[i, j] <- TRUE
+    }
+}
+```
+
+```{r}
+modmat <- out$x
+y <- logit$y
+ludfun <- function(state, log.pseudo.prior) {
+    stopifnot(is.numeric(state))
+    stopifnot(length(state) == ncol(models) + 2)
+    icomp <- state[1]
+    stopifnot(icomp == as.integer(icomp))
+    stopifnot(1 <= icomp && icomp <= nrow(models))
+    stopifnot(is.numeric(log.pseudo.prior))
+    stopifnot(length(log.pseudo.prior) == nrow(models))
+    beta <- state[-1]
+    inies <- c(TRUE, as.logical(models[icomp, ]))
+    beta.logl <- beta
+    beta.logl[! inies] <- 0
+    eta <- as.numeric(modmat %*% beta.logl)
+    logp <- ifelse(eta < 0, eta - log1p(exp(eta)), - log1p(exp(- eta)))
+    logq <- ifelse(eta < 0, - log1p(exp(eta)), - eta - log1p(exp(- eta)))
+    logl <- sum(logp[y == 1]) + sum(logq[y == 0])
+    logl + sum(dnorm(beta, 0, 2, log = TRUE)) + log.pseudo.prior[icomp]
+}
+```
+
+```{r}
+set.seed(my_seed)
+state.initial <- c(nrow(models), out$coefficients)
+qux <- rep(0, nrow(models))
+out <- temper(ludfun, initial = state.initial, neighbors = neighbors,
+              nbatch = 1000, blen = 100, log.pseudo.prior = qux)
+names(out)
+```
+
+```{r}
+out$time
+```
+
+```{r}
+ibar <- colMeans(out$ibatch)
+ibar
+```
+
+```{r}
+qux <- qux + pmin(log(max(ibar) / ibar), 10)
+qux <- qux - min(qux)
+qux
+```
+
+```{r}
+qux.save <- qux
+time.save <- out$time
+repeat{
+    out <- temper(out, log.pseudo.prior = qux)
+    ibar <- colMeans(out$ibatch)
+    qux <- qux + pmin(log(max(ibar) / ibar), 10)
+    qux <- qux - min(qux)
+    qux.save <- rbind(qux.save, qux, deparse.level = 0)
+    time.save <- rbind(time.save, out$time, deparse.level = 0)
+    if (max(ibar) / min(ibar) < 2) break
+}
+```
+
+```{r}
+print(qux.save, digits = 3)
+```
+
+```{r}
+print(qux, digits = 3)
+```
+
+```{r}
+apply(time.save, 2, sum)
+```
+
+```{r}
+print(out$accepti, digits = 3)
+```
+
+```{r}
+print(out$acceptx, digits = 3)
+```
+
+```{r}
+min(as.vector(out$accepti), na.rm = TRUE)
+```
+
+```{r}
+out <- temper(out, scale = 0.5, log.pseudo.prior = qux)
+time.save <- rbind(time.save, out$time, deparse.level = 0)
+print(out$acceptx, digits = 3)
+```
+
+```{r}
+out <- temper(out, blen = 10 * out$blen, log.pseudo.prior = qux)
+```
+
+```{r}
+time.save <- rbind(time.save, out$time, deparse.level = 0)
+foo <- apply(time.save, 2, sum)
+foo.min <- floor(foo[1] / 60)
+foo.sec <- foo[1] - 60 * foo.min
+c(foo.min, foo.sec)
+```
+
+```{r}
+log.10.unnorm.bayes <- (qux - log(colMeans(out$ibatch))) / log(10)
+k <- seq(along = log.10.unnorm.bayes)[log.10.unnorm.bayes == min(log.10.unnorm.bayes)]
+models[k, ]
+log.10.bayes <- log.10.unnorm.bayes - log.10.unnorm.bayes[k]
+log.10.bayes
+```
+
+```{r}
+fred <- var(out$ibatch) / out$nbatch
+sally <- colMeans(out$ibatch)
+mcse.log.10.bayes <- (1 / log(10)) * sqrt(diag(fred) / sally^2 -
+                                              2 * fred[ , k] / (sally * sally[k]) +
+                                              fred[k, k] / sally[k]^2)
+mcse.log.10.bayes
+```
+
+```{r}
+foompter <- cbind(models, log.10.bayes, mcse.log.10.bayes)
+round(foompter, 5)
+```
+
+```{r}
+ibar <- colMeans(out$ibatch)
+herman <- sweep(out$ibatch, 2, ibar, "/")
+herman <- sweep(herman, 1, herman[ , k], "-")
+mcse.log.10.bayes.too <- (1 / log(10)) * apply(herman, 2, sd) /sqrt(out$nbatch)
+all.equal(mcse.log.10.bayes, mcse.log.10.bayes.too)
+```
+
+
+```{r}
+finish_time <- Sys.time()
+finish_time - start_time
+```

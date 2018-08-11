@@ -1,5 +1,5 @@
 ---
-title: "Testing R on Stride"
+title: "Testing R on STRIDE"
 output: html_notebook
 ---
 Notebook for testing R on STRIDE. Runs through downloading data, plotting various elements and then running machine learning algorithms to predict outcome.
@@ -24,6 +24,7 @@ library(caret)
 library(xgboost)
 library(Matrix)
 library(stringi)
+library(rBayesianOptimization)
 ```
 
 ```{r get data}
@@ -81,17 +82,7 @@ full_matrix <- df %>%
     mutate_if(is.character, as.factor) %>% 
     data.matrix()
 
-# sparse_matrix <- sparse.model.matrix(
-#     income_level ~ ., 
-#     data = df %>% 
-#         mutate(income_level = if_else(
-#             income_level == ">50K", 
-#             1L, 
-#             0L)))
-#     
-# head(sparse_matrix)
 output_vector <- as.integer(df[, "income_level"] == ">50K")
-# head(output_vector)
 train_indxs <- createDataPartition(df$income_level, 
                                    times = 1, 
                                    p = 0.8, 
@@ -107,68 +98,146 @@ test_labels <- output_vector[-train_indxs]
 ```{r}
 dtrain <- xgb.DMatrix(data = train, label = train_labels)
 dtest <- xgb.DMatrix(data = test, label = test_labels)
-xgb_grid <- expand.grid(
-    eta = c(0.01, 0.05), 
-    max_depth = c(2, 3, 4)
-)
-cv_list <- map(seq_len(nrow(xgb_grid)), function(i) {
-    a <- xgb_grid[i, ][["eta"]]
-    b <- xgb_grid[i, ][["max_depth"]]
-    
-    xgb.cv(params = list(eta = a, 
-                         max_depth = b, 
-                         objective = "binary:logistic"), 
-           data = dtrain, 
-           nrounds = 1000L, 
-           nfold = 5, 
-           prediction = TRUE, 
-           showsd = TRUE, 
-           metrics = "error", 
-           stratified = TRUE, 
-           print_every_n = 100L, 
-           early_stopping_rounds = 100L)
-})
-# my_cv <- xgb.cv(params = list(eta = 0.01, 
-#                               max_depth = 4, 
-#                               objective = "binary:logistic"), 
-#                 data = dtrain, 
-#                 nrounds = 2000L, 
-#                 nfold = 5, 
-#                 prediction = TRUE, 
-#                 showsd = TRUE, 
-#                 metrics = "logloss", 
-#                 stratified = TRUE, 
-#                 print_every_n = 100L)
+
+# set seed for reproducibility
+set.seed(1907L)
+
+# define the folds for cross-validation
+cv_folds <- KFold(train_labels, nfolds = 5,
+                  stratified = TRUE, seed = 0)
+
+# create a function that will return values for the optimisation
+xgb_cv_bayes <- function(max_depth, 
+                         min_child_weight, 
+                         subsample, 
+                         eta,
+                         colsample_bytree, 
+                         lambda, 
+                         alpha) {
+    cv <- xgb.cv(params = list(booster = "gbtree", 
+                               eta = eta,
+                               max_depth = max_depth,
+                               min_child_weight = min_child_weight,
+                               subsample = subsample, 
+                               colsample_bytree = colsample_bytree,
+                               lambda = lambda, 
+                               alpha = alpha,
+                               objective = "binary:logistic",
+                               eval_metric = "error"),
+                 data = dtrain, 
+                 nrounds = 10000L,
+                 folds = cv_folds, 
+                 prediction = TRUE, 
+                 showsd = TRUE,
+                 early_stopping_rounds = 100L, 
+                 maximize = FALSE, 
+                 verbose = 0)
+    list(Score = cv$evaluation_log$test_error_mean[cv$best_iteration],
+         Pred = cv$pred)
+}
+
+# run optimisation with bounds for the parameters to be tested
+xgb_opt_res <- BayesianOptimization(xgb_cv_bayes,
+                                    bounds = list(
+                                        max_depth = c(1L, 8L),
+                                        min_child_weight = c(1L, 10L), 
+                                        subsample = c(0.2, 1.0), 
+                                        eta = c(0.001, 0.1), 
+                                        colsample_bytree = c(0.2, 1), 
+                                        lambda = c(0.5, 5.0), 
+                                        alpha = c(0.5, 1, 1.5, 2)),
+                                    init_grid_dt = NULL, 
+                                    init_points = 3, 
+                                    n_iter = 2,
+                                    acq = "ucb", 
+                                    kappa = 2.576, 
+                                    eps = 0.0,
+                                    verbose = TRUE)
 ```
 
-```{r}
-errors <- map_dbl(seq_along(cv_list), function(i) {
-    min(cv_list[[i]][["evaluation_log"]][["test_error_mean"]])
-})
-best_cv <- cv_list[[which.min(errors)]]
-(best_params <- xgb_grid[which.min(errors), ])
-```
+Now run the cross-validation again with the best parameters found, to have the evaluation log.
 
 ```{r}
-best_cv[["evaluation_log"]] %>% 
-    gather(key = "partition", value = "error", 
-           train_error_mean, test_error_mean) %>% 
-    dplyr::select(iter, partition, error) %>% 
+xgb_params <- xgb_opt_res[["Best_Par"]]
+xgb_param_list <- list(
+    eta = xgb_params[["eta"]], 
+    max_depth = xgb_params[["max_depth"]], 
+    min_child_weight = xgb_params[["min_child_weight"]], 
+    subsample = xgb_params[["subsample"]], 
+    colsample_bytree = xgb_params[["colsample_bytree"]], 
+    lambda = xgb_params[["lambda"]], 
+    alpha = xgb_params[["alpha"]], 
+    objective = "binary:logistic", 
+    eval_metric = "error")
+
+xgb_cv <- xgb.cv(params = xgb_param_list, 
+                 data = dtrain, 
+                 nrounds = 10000L,
+                 folds = cv_folds, 
+                 prediction = TRUE, 
+                 showsd = TRUE,
+                 early_stopping_rounds = 1000L, 
+                 print_every_n = 500L, 
+                 maximize = TRUE)
+```
+
+
+```{r}
+xgb_cv[["evaluation_log"]] %>% 
+    dplyr::select(iter, train_error_mean, test_error_mean) %>% 
+    gather(key = "partition", 
+           value = "error", 
+           train_error_mean, 
+           test_error_mean) %>% 
     mutate(partition = stri_extract_first_regex(partition, "^[a-z]+")) %>% 
     ggplot(aes(x = iter, y = error, colour = partition)) +
     geom_point() +
-    scale_colour_viridis(discrete = TRUE, option = "C") + 
+    scale_colour_viridis(discrete = TRUE, option = "B") + 
     theme_minimal()
+```
+
+Now train the XGBoost model.
+
+```{r}
+xgb_model <- xgb.train(params = xgb_param_list, 
+                       data = dtrain, 
+                       nrounds = xgb_cv[["best_iteration"]], 
+                       metrics = "error")
+```
+
+Plot variable importance.
+
+Now I need to set the prediction threshold on the test set.
+
+```{r}
+xgb_preds <- predict(xgb_model, dtest)
+thresholds <- seq(0.01, 0.99, 0.01)
+F1_scores <- map_dbl(thresholds, 
+                     function(x) {
+                         tmp_preds <- as.integer(predict(my_xgb, dtest) > x)
+                         conmat <- confusionMatrix(as.factor(tmp_preds), 
+                                                   as.factor(test_labels))
+                         conmat[["byClass"]][["F1"]]
+})
+xgb_best_threshold <- thresholds[which.max(F1_scores)]
+paste0("Threshold that maximises F1 is ", xgb_best_threshold)
+```
+
+```{r}
+var_importance <- xgb.importance(model = xgb_model)
+xgb.plot.importance(var_importance)
 ```
 
 ```{r}
 best_iter <- which.min(best_cv[["evaluation_log"]][["test_error_mean"]])
-my_xgb <- xgb.train(params = list(eta = best_params[["eta"]], 
-                                  max_depth = best_params[["max_depth"]], 
-                                  objective = "binary:logistic"), 
-                    data = dtrain, 
-                    nrounds = best_iter, 
-                    metrics = "error")
+my_xgb <- xgb.train(params = list(
+    eta = best_params[["eta"]], 
+    max_depth = best_params[["max_depth"]], 
+    min_child_weight = best_params[["min_child_weight"]], 
+    objective = "binary:logistic"), 
+    data = dtrain, 
+    nrounds = best_iter, 
+    metrics = "error")
 ```
 
 ```{r}
