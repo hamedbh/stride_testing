@@ -1,0 +1,212 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Attribution for data: 
+
+Gungor, A. (2018). Fifty Victorian Era Novelists Authorship Attribution Data. IUPUI University Library. [http://dx.doi.org/10.7912/D2N65J](http://dx.doi.org/10.7912/D2N65J)
+
+```{r starting timestamp}
+start_time <- Sys.time()
+paste("Notebook started at", start_time)
+```
+
+```{r}
+suppressPackageStartupMessages({
+    library(dplyr)
+    library(tm)
+    library(readr)
+    library(tidytext)
+    library(stringi)
+    library(textstem)
+    library(irlba)
+    library(xgboost)
+    library(rBayesianOptimization)
+    library(caret)
+    library(topicmodels)
+    library(ggplot2)
+    library(viridis)
+    # library(janeaustenr)
+    # library(gutenbergr)
+})
+```
+
+```{r}
+data("AssociatedPress")
+AssociatedPress
+```
+
+```{r}
+system.time({
+    ap_lda <- LDA(AssociatedPress, k = 12 
+                  , control = list(seed = 1907L))
+})
+```
+
+```{r}
+ap_topics <- tidy(ap_lda, matrix = "beta")
+ap_topics
+```
+
+```{r}
+ap_top_terms <- ap_topics %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    arrange(topic, -beta)
+
+ap_top_terms %>%
+    mutate(term = reorder(term, beta)) %>%
+    ggplot(aes(term, beta, fill = factor(topic))) +
+    scale_fill_viridis(discrete = TRUE) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free") +
+    theme(axis.text.x = element_blank(), 
+          axis.ticks.x = element_blank()) +
+    coord_flip()
+```
+
+
+```{r}
+train_url <- "https://dataworks.iupui.edu/bitstream/handle/11243/23/Gungor_2018_VictorianAuthorAttribution_data-train.csv"
+train_filepath <- "./data/authors_train.csv"
+
+if (!file.exists(train_filepath)) {
+    download.file(train_url, train_filepath)
+}
+```
+
+```{r}
+full_df <- read_csv(train_filepath, col_types = c("ci")) %>% 
+    mutate(author = factor(author)) %>% 
+    mutate(doc_id = row_number()) %>% 
+    select(doc_id, text, author)
+levels(full_df$author) <- seq_len(length(unique(full_df$author)))
+full_df
+```
+
+Create DTM for all data.
+
+
+```{r}
+full_df <- full_df[sample(seq_len(nrow(full_df)), 1000), ]
+```
+
+# ```{r}
+# all_corpus <- full_df %>%
+#     select(text) %>%
+#     pull() %>%
+#     VectorSource() %>%
+#     Corpus()
+# 
+# all_corpus_clean <- all_corpus %>%
+#     tm_map(removePunctuation) %>%
+#     tm_map(removeNumbers) %>%
+#     tm_map(removeWords, stopwords(kind = "en")) %>%
+#     tm_map(stripWhitespace) %>%
+#     tm_map(content_transformer(tolower))
+# ```
+
+```{r}
+all_tokenised <- full_df %>% 
+    unnest_tokens(output = word, input = text) %>% 
+    anti_join(stop_words, by = "word") %>% 
+    filter(nchar(word) > 2) %>% 
+    mutate(word = stri_replace_all_regex(word, "'", "")) %>% 
+    filter(!stri_detect(word, regex = "[^a-z]")) %>% 
+    mutate(token = lemmatize_words(word)) %>% 
+    select(-word)
+
+all_token_count <- all_tokenised %>% 
+    count(doc_id, token, sort = TRUE)
+
+all_total_tokens <- all_token_count %>% 
+    group_by(doc_id) %>% 
+    summarise(doc_total_tokens = sum(n))
+
+all_tfidf <- all_token_count %>% 
+    left_join(all_total_tokens, by = "doc_id") %>% 
+    bind_tf_idf(token, doc_id, n = n)
+
+all_dtm <- cast_sparse(all_tfidf, 
+                       doc_id, 
+                       token, 
+                       tf_idf)
+```
+
+```{r}
+all_svd <- irlba(all_dtm, nv = 100L)
+```
+
+```{r}
+in_train <- createDataPartition(full_df$author, p = 0.8, list = FALSE)
+all_labels <- as.integer(full_df$author) - 1L
+train_labels <- all_labels[in_train]
+test_labels <- all_labels[-in_train]
+dtrain <- xgb.DMatrix(data = all_svd$u[in_train, ], label = train_labels)
+dtest <- xgb.DMatrix(data = all_svd$u[-in_train, ], label = test_labels)
+```
+
+```{r}
+# set seed for reproducibility
+set.seed(1907L)
+
+# define the folds for cross-validation
+cv_folds <- KFold(train_labels, nfolds = 5,
+                  stratified = TRUE, seed = 1907L)
+
+# create a function that will return values for the optimisation
+xgb_cv_bayes <- function(max_depth, 
+                         min_child_weight, 
+                         subsample, 
+                         eta,
+                         colsample_bytree, 
+                         lambda, 
+                         alpha) {
+    cv <- xgb.cv(params = list(booster = "gbtree", 
+                               eta = eta,
+                               max_depth = max_depth,
+                               min_child_weight = min_child_weight,
+                               subsample = subsample, 
+                               colsample_bytree = colsample_bytree,
+                               lambda = lambda, 
+                               alpha = alpha,
+                               objective = "multi:softmax",
+                               eval_metric = "mlogloss"),
+                 data = dtrain, 
+                 nrounds = 100L,
+                 num_class = 45L, 
+                 folds = cv_folds, 
+                 prediction = TRUE, 
+                 showsd = TRUE,
+                 early_stopping_rounds = 100L, 
+                 maximize = FALSE, 
+                 verbose = 0)
+    list(Score = cv$evaluation_log$test_mlogloss_mean[cv$best_iteration],
+         Pred = cv$pred)
+}
+
+# run optimisation with bounds for the parameters to be tested
+xgb_opt_res <- BayesianOptimization(xgb_cv_bayes,
+                                    bounds = list(
+                                        max_depth = c(1L, 8L),
+                                        min_child_weight = c(1L, 10L), 
+                                        subsample = c(0.2, 1.0), 
+                                        eta = c(0.001, 0.1), 
+                                        colsample_bytree = c(0.2, 1), 
+                                        lambda = c(0.5, 5.0), 
+                                        alpha = c(0.5, 1, 1.5, 2)),
+                                    init_grid_dt = NULL, 
+                                    init_points = 10L, 
+                                    n_iter = 10L,
+                                    acq = "ucb", 
+                                    kappa = 2.576, 
+                                    eps = 0.0,
+                                    verbose = TRUE)
+```
+
+```{r}
+finish_time <- Sys.time()
+finish_time - start_time
+```
